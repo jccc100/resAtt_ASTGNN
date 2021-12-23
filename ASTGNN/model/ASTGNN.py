@@ -6,6 +6,7 @@ import math
 import numpy as np
 from lib.utils import norm_Adj
 
+
 def clones(module, N):
     '''
     Produce N identical layers.
@@ -73,7 +74,7 @@ class Spatial_Attention_layer(nn.Module):
         super(Spatial_Attention_layer, self).__init__()
         self.dropout = nn.Dropout(p=dropout)
 
-    def forward(self, x):
+    def forward(self, x,score_his=None):
         '''
         :param x: (batch_size, N, T, F_in)
         :return: (batch_size, T, N, N)
@@ -83,10 +84,12 @@ class Spatial_Attention_layer(nn.Module):
         x = x.permute(0, 2, 1, 3).reshape((-1, num_of_vertices, in_channels))  # (b*t,n,f_in)
 
         score = torch.matmul(x, x.transpose(1, 2)) / math.sqrt(in_channels)  # (b*t, N, F_in)(b*t, F_in, N)=(b*t, N, N)
-
+        if score_his is not None:
+            score+=score_his
+        score_his=score
         score = self.dropout(F.softmax(score, dim=-1))  # the sum of each row is 1; (b*t, N, N)
 
-        return score.reshape((batch_size, num_of_timesteps, num_of_vertices, num_of_vertices))
+        return score.reshape((batch_size, num_of_timesteps, num_of_vertices, num_of_vertices)),score_his
 
 
 class spatialAttentionGCN(nn.Module):
@@ -97,6 +100,7 @@ class spatialAttentionGCN(nn.Module):
         self.out_channels = out_channels
         self.Theta = nn.Linear(in_channels, out_channels, bias=False)
         self.SAt = Spatial_Attention_layer(dropout=dropout)
+        self.score_his=None
 
     def forward(self, x):
         '''
@@ -107,7 +111,7 @@ class spatialAttentionGCN(nn.Module):
 
         batch_size, num_of_vertices, num_of_timesteps, in_channels = x.shape
 
-        spatial_attention = self.SAt(x)  # (batch, T, N, N)
+        spatial_attention ,self.score_his= self.SAt(x,self.score_his)  # (batch, T, N, N)
 
         x = x.permute(0, 2, 1, 3).reshape((-1, num_of_vertices, in_channels))  # (b*t,n,f_in)
 
@@ -242,7 +246,7 @@ class PositionWiseGCNFeedForward(nn.Module):
         return self.dropout(F.relu(self.gcn(x)))
 
 
-def attention(query, key, value, mask=None, dropout=None, score_his=None):
+def attention(query, key, value, mask=None, dropout=None):
     '''
 
     :param query:  (batch, N, h, T1, d_k)
@@ -255,9 +259,9 @@ def attention(query, key, value, mask=None, dropout=None, score_his=None):
     d_k = query.size(-1)
     scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d_k)  # scores: (batch, N, h, T1, T2)
     # score_his = scores
-    if score_his is not None:
-        scores+=score_his
-    score_his = scores
+    # if score_his is not None:
+    #     scores+=score_his
+    # score_his = scores
     if mask is not None:
         scores = scores.masked_fill_(mask == 0, -1e9)  # -1e9 means attention scores=0
     p_attn = F.softmax(scores, dim=-1)
@@ -265,7 +269,7 @@ def attention(query, key, value, mask=None, dropout=None, score_his=None):
         p_attn = dropout(p_attn)
     # p_attn: (batch, N, h, T1, T2)
 
-    return torch.matmul(p_attn, value), p_attn, score_his  # (batch, N, h, T1, d_k), (batch, N, h, T1, T2)
+    return torch.matmul(p_attn, value), p_attn  # (batch, N, h, T1, d_k), (batch, N, h, T1, T2)
 
 
 class MultiHeadAttention(nn.Module):
@@ -329,7 +333,7 @@ class MultiHeadAttentionAwareTemporalContex_qc_kc(nn.Module):  # key causal; que
         self.w_length = num_of_weeks * points_per_hour
         self.d_length = num_of_days * points_per_hour
         self.h_length = num_of_hours * points_per_hour
-        self.score_his=None
+        # self.score_his=None
 
     def forward(self, query, key, value, mask=None, query_multi_segment=False, key_multi_segment=False):
         '''
@@ -408,7 +412,7 @@ class MultiHeadAttentionAwareTemporalContex_qc_kc(nn.Module):  # key causal; que
         value = self.linears[0](value).view(nbatches, N, -1, self.h, self.d_k).transpose(2, 3)
 
         # apply attention on all the projected vectors in batch
-        x, self.attn,self.score_his = attention(query, key, value, mask=mask, dropout=self.dropout,score_his=self.score_his)
+        x, self.attn = attention(query, key, value, mask=mask, dropout=self.dropout)
         # x:(batch, N, h, T1, d_k)
         # attn:(batch, N, h, T1, T2)
 
@@ -435,7 +439,7 @@ class MultiHeadAttentionAwareTemporalContex_q1d_k1d(nn.Module):  # 1d conv on qu
         self.w_length = num_of_weeks * points_per_hour
         self.d_length = num_of_days * points_per_hour
         self.h_length = num_of_hours * points_per_hour
-        self.score_his=None
+        # self.score_his=None
 
     def forward(self, query, key, value, mask=None, query_multi_segment=False, key_multi_segment=False):
         '''
@@ -514,10 +518,10 @@ class MultiHeadAttentionAwareTemporalContex_q1d_k1d(nn.Module):  # 1d conv on qu
         value = self.linears[0](value).view(nbatches, N, -1, self.h, self.d_k).transpose(2, 3)
 
         # apply attention on all the projected vectors in batch
-        # x, self.attn = attention(query, key, value, mask=mask, dropout=self.dropout)
-        x, self.attn, self.score_his = attention(query, key, value, mask=mask, dropout=self.dropout,
-                                                 score_his=self.score_his)
-        # x:(batch, N, h, T1, d_k)
+        x, self.attn = attention(query, key, value, mask=mask, dropout=self.dropout)
+        # x, self.attn, self.score_his = attention(query, key, value, mask=mask, dropout=self.dropout,
+        #                                          score_his=self.score_his)
+        # # x:(batch, N, h, T1, d_k)
         # attn:(batch, N, h, T1, T2)
 
         x = x.transpose(2, 3).contiguous()  # (batch, N, T1, h, d_k)
@@ -540,7 +544,7 @@ class MultiHeadAttentionAwareTemporalContex_qc_k1d(nn.Module):  # query: causal 
         self.w_length = num_of_weeks * points_per_hour
         self.d_length = num_of_days * points_per_hour
         self.h_length = num_of_hours * points_per_hour
-        self.score_his=None
+        # self.score_his=None
 
     def forward(self, query, key, value, mask=None, query_multi_segment=False, key_multi_segment=False):
         '''
@@ -626,9 +630,9 @@ class MultiHeadAttentionAwareTemporalContex_qc_k1d(nn.Module):  # query: causal 
         value = self.linears[0](value).view(nbatches, N, -1, self.h, self.d_k).transpose(2, 3)
 
         # apply attention on all the projected vectors in batch
-        # x, self.attn = attention(query, key, value, mask=mask, dropout=self.dropout)
-        x, self.attn, self.score_his = attention(query, key, value, mask=mask, dropout=self.dropout,
-                                                 score_his=self.score_his)
+        x, self.attn = attention(query, key, value, mask=mask, dropout=self.dropout)
+        # x, self.attn, self.score_his = attention(query, key, value, mask=mask, dropout=self.dropout,
+        #                                          score_his=self.score_his)
         # x:(batch, N, h, T1, d_k)
         # attn:(batch, N, h, T1, T2)
 
